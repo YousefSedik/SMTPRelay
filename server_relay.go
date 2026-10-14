@@ -9,8 +9,8 @@
 //	UPSTREAM_USER   upstream username                 (required)
 //	UPSTREAM_PASS   upstream password                 (required)
 //	FROM_OVERRIDE   if set, replaces the envelope sender (some providers require this)
-//	LOCAL_USER      if set (with LOCAL_PASS), clients must authenticate to this relay
-//	LOCAL_PASS      password for local clients
+//
+// Clients connecting to the relay are always accepted without authentication.
 package main
 
 import (
@@ -23,11 +23,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/emersion/go-sasl"
 	"github.com/emersion/go-smtp"
-
-	"github.com/joho/godotenv"
-
 )
 
 type config struct {
@@ -37,8 +33,6 @@ type config struct {
 	upstreamUser string
 	upstreamPass string
 	fromOverride string
-	localUser    string
-	localPass    string
 }
 
 func env(key, def string) string {
@@ -56,8 +50,6 @@ func loadConfig() config {
 		upstreamUser: os.Getenv("UPSTREAM_USER"),
 		upstreamPass: os.Getenv("UPSTREAM_PASS"),
 		fromOverride: os.Getenv("FROM_OVERRIDE"),
-		localUser:    os.Getenv("LOCAL_USER"),
-		localPass:    os.Getenv("LOCAL_PASS"),
 	}
 	if c.upstreamHost == "" || c.upstreamUser == "" || c.upstreamPass == "" {
 		log.Fatal("UPSTREAM_HOST, UPSTREAM_USER and UPSTREAM_PASS are required")
@@ -139,38 +131,16 @@ func (c config) forward(from string, to []string, data []byte) error {
 type backend struct{ cfg config }
 
 func (b *backend) NewSession(_ *smtp.Conn) (smtp.Session, error) {
-	return &session{cfg: b.cfg, authed: b.cfg.localUser == ""}, nil
+	return &session{cfg: b.cfg}, nil
 }
 
 type session struct {
-	cfg    config
-	authed bool
-	from   string
-	to     []string
-}
-
-// AuthSession: optional authentication for clients connecting to the relay.
-func (s *session) AuthMechanisms() []string {
-	if s.cfg.localUser == "" {
-		return nil
-	}
-	return []string{sasl.Plain}
-}
-
-func (s *session) Auth(mech string) (sasl.Server, error) {
-	return sasl.NewPlainServer(func(_, username, password string) error {
-		if username != s.cfg.localUser || password != s.cfg.localPass {
-			return errors.New("invalid credentials")
-		}
-		s.authed = true
-		return nil
-	}), nil
+	cfg  config
+	from string
+	to   []string
 }
 
 func (s *session) Mail(from string, _ *smtp.MailOptions) error {
-	if !s.authed {
-		return smtp.ErrAuthRequired
-	}
 	s.from = from
 	return nil
 }
@@ -205,10 +175,6 @@ func (s *session) Reset() {
 func (s *session) Logout() error { return nil }
 
 func main() {
-	err := godotenv.Load()
-	if err != nil {
-		log.Fatal("Error loading .env file")
-	}
 	
 	cfg := loadConfig()
 
@@ -219,8 +185,6 @@ func main() {
 	srv.WriteTimeout = 60 * time.Second
 	srv.MaxMessageBytes = 25 * 1024 * 1024
 	srv.MaxRecipients = 100
-	// Local listener is plain text. Only enable this on localhost / trusted networks.
-	srv.AllowInsecureAuth = true
 
 	log.Printf("SMTP relay listening on %s -> %s:%s", cfg.listenAddr, cfg.upstreamHost, cfg.upstreamPort)
 	log.Fatal(srv.ListenAndServe())
